@@ -17,8 +17,10 @@ DEBUG = False
 
 import os
 import sys
+import math
 import struct
 import bluetooth._bluetooth as bluez
+from datetime import datetime
 
 LE_META_EVENT = 0x3e
 LE_PUBLIC_ADDRESS=0x00
@@ -44,6 +46,37 @@ ADV_DIRECT_IND=0x01
 ADV_SCAN_IND=0x02
 ADV_NONCONN_IND=0x03
 ADV_SCAN_RSP=0x04
+
+import numpy as np
+def calcAngles(x,y,z):
+      x2 = x*x
+      y2 = y*y
+      z2 = z*z
+      #  angle to xAxis
+      result=np.sqrt(y2+z2)
+      result=-x/result
+      ax = np.arctan(result)/np.pi * 180.0
+      # angle to yAxis
+      fraction = 0.1
+      result=np.sign(z)*np.sqrt(fraction*x2+z2)
+      result=y/result
+      roll = np.arctan(result)/np.pi * 180.0
+      #  read Tilt
+      result=np.sqrt(x2+y2+z2)
+      result=z/result
+      tilt = np.arccos(result)/np.pi * 180.0
+
+      hyp = np.sqrt(x2+y2)
+      if hyp < 0.2:      # when the sensor is too flat for a reliable measure
+        a = float('nan')
+      elif(x > y):       # the short axis provides most accurate reading
+        a = np.arcsin(y/hyp)/np.pi * 180.0
+      else:
+        a = np.arccos(x/hyp)/np.pi * 180.0
+      if a < 0.0:        # always norm to a range between 0 and 360
+        a += 360.0
+      return a,tilt
+
 
 
 def returnnumberpacket(pkt):
@@ -112,7 +145,7 @@ def hci_le_set_scan_parameters(sock):
 
 
     
-def parse_events(sock, loop_count=100):
+def parse_events(sock, loop_count=100,macfilter=None):
     old_filter = sock.getsockopt( bluez.SOL_HCI, bluez.HCI_FILTER, 14)
 
     # perform a device inquiry on bluetooth device #0
@@ -129,9 +162,11 @@ def parse_events(sock, loop_count=100):
     for i in range(0, loop_count):
         pkt = sock.recv(255)
         ptype, event, plen = struct.unpack("BBB", pkt[:3])
-        #print "--------------" 
+        
         if event == bluez.EVT_INQUIRY_RESULT_WITH_RSSI:
 		i =0
+        elif event == ADV_IND:
+          i = 0
         elif event == bluez.EVT_NUM_COMP_PKTS:
                 i =0 
         elif event == bluez.EVT_DISCONN_COMPLETE:
@@ -139,42 +174,74 @@ def parse_events(sock, loop_count=100):
         elif event == LE_META_EVENT:
             subevent, = struct.unpack("B", pkt[3])
             pkt = pkt[4:]
+            offset = 0
+            mac = packed_bdaddr_to_string(pkt[offset + 3:offset + 9])
+            if plen < 40:
+              break
+            print "\t len:"+str(plen)+" fullpacket: ", printpacket(pkt)
+              
             if subevent == EVT_LE_CONN_COMPLETE:
                 le_handle_connection_complete(pkt)
             elif subevent == EVT_LE_ADVERTISING_REPORT:
                 #print "advertising report"
-                num_reports = struct.unpack("B", pkt[0])[0]
-                report_pkt_offset = 0
-                for i in range(0, num_reports):
+                num_reports,adv_type = struct.unpack("BB", pkt[0:2])
+                if adv_type == ADV_SCAN_RSP:
+                  print "ignoring ADV_SCAN_RSP ("+hex(adv_type)+") Advertising"
+                elif adv_type == ADV_SCAN_IND :
+                  print "ignoring ADV_SCAN_IND ("+hex(adv_type)+") Advertising"
+  #             elif adv_type == ADV_IND :
+  #               print "ignoring ADV_IND ("+hex(adv_type)+") Advertising"
+                else:
+                  print " ("+hex(adv_type)+") Advertising"
+                  if macfilter or macfilter == mac:
+                    m_offset = offset +10
+                    s = mac + " - "+str(datetime.now())
+                    bat, = struct.unpack("B",pkt[m_offset+13])
+                    x,y,z = struct.unpack(">hhh",pkt[m_offset+14:m_offset+20])
+                    xf = float(x)/256.0
+                    yf = float(y)/256.0
+                    zf = float(z)/256.0
+                    f = "%0.2f"
+                    s += " x:"+f%xf+" y:"+f%yf+" z:"+f%zf
+                    r,t = calcAngles(xf,yf,zf)
+                    s += " r:"+f%r+" t:"+f%t
+                    print s
+                  else:
+                    for i in range(0, num_reports):
 		
-		    if (DEBUG == True):
+		      if (DEBUG == True):
 			print "-------------"
                     	#print "\tfullpacket: ", printpacket(pkt)
-		    	print "\tUDID: ", printpacket(pkt[report_pkt_offset -22: report_pkt_offset - 6])
-		    	print "\tMAJOR: ", printpacket(pkt[report_pkt_offset -6: report_pkt_offset - 4])
-		    	print "\tMINOR: ", printpacket(pkt[report_pkt_offset -4: report_pkt_offset - 2])
-                    	print "\tMAC address: ", packed_bdaddr_to_string(pkt[report_pkt_offset + 3:report_pkt_offset + 9])
+		    	print "\tUDID: ", printpacket(pkt[offset -22: offset - 6])
+		    	print "\tMAJOR: ", printpacket(pkt[offset -6: offset - 4])
+		    	print "\tMINOR: ", printpacket(pkt[offset -4: offset - 2])
+                    	print "\tMAC address: ", packed_bdaddr_to_string(pkt[offset + 3:offset + 9])
 		    	# commented out - don't know what this byte is.  It's NOT TXPower
-                    	txpower, = struct.unpack("b", pkt[report_pkt_offset -2])
+                    	txpower, = struct.unpack("b", pkt[offset -2])
                     	print "\t(Unknown):", txpower
 	
-                    	rssi, = struct.unpack("b", pkt[report_pkt_offset -1])
+                    	rssi, = struct.unpack("b", pkt[offset -1])
                     	print "\tRSSI:", rssi
-		    # build the return string
-                    Adstring = packed_bdaddr_to_string(pkt[report_pkt_offset + 3:report_pkt_offset + 9])
-		    Adstring += ","
-		    Adstring += returnstringpacket(pkt[report_pkt_offset -22: report_pkt_offset - 6]) 
-		    Adstring += ","
-		    Adstring += "%i" % returnnumberpacket(pkt[report_pkt_offset -6: report_pkt_offset - 4]) 
-		    Adstring += ","
-		    Adstring += "%i" % returnnumberpacket(pkt[report_pkt_offset -4: report_pkt_offset - 2]) 
-		    Adstring += ","
-		    Adstring += "%i" % struct.unpack("b", pkt[report_pkt_offset -2])
-		    Adstring += ","
-		    Adstring += "%i" % struct.unpack("b", pkt[report_pkt_offset -1])
+		      # build the return string
+                      Adstring = packed_bdaddr_to_string(pkt[offset + 3:offset + 9])
+		      Adstring += ","
+		      Adstring += returnstringpacket(pkt[offset -22: offset - 6]) 
+		      Adstring += ","
+		      Adstring += "%i" % returnnumberpacket(pkt[offset -2]) 
+		      Adstring += ","
+		      Adstring += "%i" % returnnumberpacket(pkt[offset -6: offset - 4]) 
+		      Adstring += ","
+		      Adstring += "%i" % returnnumberpacket(pkt[offset -4: offset - 2]) 
+		      Adstring += ","
+		      Adstring += "%i" % struct.unpack("b", pkt[offset -2])
+		      Adstring += ","
+		      Adstring += "%i" % struct.unpack("b", pkt[offset -1])
+#	    Adstring += "=("+str(len(pkt))+")\t"
+#	    Adstring += returnstringpacket(pkt)
 
 		    #print "\tAdstring=", Adstring
- 		    myFullList.append(Adstring)
+         
+ 	  	      myFullList.append(Adstring)
                 done = True
     sock.setsockopt( bluez.SOL_HCI, bluez.HCI_FILTER, old_filter )
     return myFullList

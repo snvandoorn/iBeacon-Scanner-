@@ -3,6 +3,7 @@
 
 import blescan
 import sys
+from datetime import datetime
 
 import bluetooth._bluetooth as bluez
 
@@ -18,9 +19,13 @@ except:
 blescan.hci_le_set_scan_parameters(sock)
 blescan.hci_enable_le_scan(sock)
 
-while True:
-	returnedList = blescan.parse_events(sock, 10)
-	print "----------"
+filterbeacon = None
+if __name__=="__main__":
+  if (len(sys.argv) >1):
+    filterbeacon = sys.argv[1]
+  while True:
+	returnedList = blescan.parse_events(sock, 10,filterbeacon)
+	print "----------"+ str(datetime.now())
 	for beacon in returnedList:
 		print beacon
 
